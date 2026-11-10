@@ -1,0 +1,11 @@
+# Inference (needed by main.py predict())
+numpy>=1.26,<2.0
+opencv-python-headless>=4.9,<4.11
+# pinned: newer releases removed the mp.solutions (Holistic) API used in features.py
+mediapipe==0.10.14
+onnxruntime>=1.18
+
+# Training / conversion only
+torch>=2.3,<2.6
+onnx>=1.16
+tqdm
