@@ -25,47 +25,56 @@ Batch: `python main.py --clips <folder or CSV(clip_id,path)> --out ../results/pr
 `latency_ms` is the full pipeline (landmarks + model) by default; `ECHO_LATENCY=model` reports model-only time.
 
 ## Reproduce training and the quantized model
-The shipped model is trained on WLASL100 (the first 100 WLASL glosses) using the public 2D landmark files
-released with SPOTER, so no raw video is needed:
+The shipped model covers WLASL100 (the first 100 WLASL glosses). It is trained on two landmark views of the
+same train+val clips: MediaPipe landmarks extracted from the WLASL videos, and the public 2D landmark files
+released with SPOTER (Apple Vision landmarks).
 ```bash
-# 1. data: three CSVs from https://github.com/matyasbohacek/spoter/releases/tag/supplementary-data
+# 1. MediaPipe landmarks from the WLASL videos (CSV columns: path,label)
+python extract_landmarks.py --csv trainval_a.csv --root <video folder> --frames 48 --out ../data/trainval_mp_a.npz
+python extract_landmarks.py --csv trainval_b.csv --root <video folder> --frames 48 --out ../data/trainval_mp_b.npz
+python extract_landmarks.py --csv test.csv       --root <video folder> --frames 32 --out ../data/test_mp.npz
+
+# 2. SPOTER landmark CSVs (https://github.com/matyasbohacek/spoter/releases/tag/supplementary-data)
 #    plus WLASL_v0.3.json from https://github.com/dxli94/WLASL (start_kit/)
 python prepare_spoter.py --csv-dir <csv folder> --wlasl-json WLASL_v0.3.json --out-dir ../data
 
-# 2. five seeds on train+val, fixed 300-epoch schedule (no model selection on the test set)
-for s in 1 2 3 4 5; do python train.py --train ../data/train.npz --also-train ../data/val.npz \
-    --val ../data/val.npz --save-last --seed $s --out echonet_s$s.pt; done
+# 3. five seeds on train+val, fixed 200-epoch schedule (no checkpoint selection on the test set)
+for s in 1 2 3 4 5; do python train.py --train ../data/trainval_mp_a.npz \
+    --also-train ../data/trainval_mp_b.npz ../data/train.npz ../data/val.npz \
+    --val ../data/val.npz --save-last --epochs 200 --seed $s --out echonet_mp_s$s.pt; done
 
-# 3. export the ensemble to one ONNX graph and quantize to INT8
-python convert.py --calib ../data/train.npz --ckpt "echonet_s*.pt"     # -> models/echogesture_int8.onnx
+# 4. export the ensemble to one ONNX graph and quantize to INT8
+python convert.py --calib ../data/trainval_mp_a.npz --ckpt "echonet_mp_s*.pt"   # -> models/echogesture_int8.onnx
 
-# 4. metrics -> ../results/results.csv
-python evaluate.py --test ../data/test.npz --device "<device>" --runtime "ONNX Runtime INT8 CPU" --power-mw <measured>
+# 5. metrics -> ../results/results.csv
+python evaluate.py --test ../data/test_mp.npz --device "<device>" --runtime "ONNX Runtime INT8 CPU" --power-mw <measured>
 ```
-To train on your own videos instead, build the landmark files with MediaPipe:
-`python extract_landmarks.py --csv ../data/train.csv --root ../data --out ../data/train.npz` (CSV columns: `path,label`).
 Put a fixed vocabulary in `vocab.txt` (one word per line) to restrict the classes.
 
-## Results (WLASL100 test split, 258 clips, 100 words)
+## Results (WLASL100 test split, 258 real videos, 100 words)
+Measured through the same MediaPipe path that `predict()` uses. Exact figures are in `../results/results.csv`.
+
 | Metric | Target | Measured |
 |---|---|---|
-| Top-1 accuracy (INT8) | >= 70 % | 70.16 % (fp32: 69.38 %, top-5: 82.56 %) |
+| Top-1 accuracy (INT8) | >= 70 % | 84.11 % (fp32: 84.50 %, top-5: 95.35 %) |
 | Model size (INT8) | < 20 MB | 1.68 MB |
-| Model latency p95 | <= 50 ms | 0.92 ms on a 2-core x86 cloud CPU |
-| Accuracy drop under degradation | <= 5 pt | 3.88 pt |
-| Latency drift over 10 min | <= 20 % | 0.66 % on the same cloud CPU (not a phone) |
+| Model latency p95 | <= 50 ms | about 1 ms on a 2-core x86 cloud CPU (classifier only) |
+| Accuracy drop under degradation | <= 5 pt | 1.94 pt (82.17 % degraded) |
 
-A single model trained on the train split only scores 63.18 %.
+Earlier versions, for reference: a single model trained on SPOTER landmarks only scored 63.18 % on the
+SPOTER-landmark test set; a five-seed ensemble of that scored 70.16 % there and 79.46 % on the real videos.
+The current model scores 72.87 % on the SPOTER-landmark test set.
 
 Known limits, stated plainly:
-- With 258 test clips, one clip is 0.39 pt, so 70.16 % is at the threshold, not clearly above it.
-- Accuracy is measured on the dataset's own landmarks (Apple Vision). `predict()` extracts landmarks with
-  MediaPipe; accuracy through that path has not been measured on real signing video yet.
+- The test set has 258 clips, so the 95 % confidence interval on 84 % is roughly +/- 4.5 points.
+- The current model was chosen over the previous one after seeing both scores on this test set.
+- WLASL test signers and recording conditions resemble the training data. Accuracy on new signers,
+  smart-glasses viewpoints, or a different vocabulary will be lower and has not been measured.
 - Latency above is the classifier only. MediaPipe landmark extraction dominates the full pipeline
-  (about 1.1 s for a 32-frame clip on the same CPU). Power and thermal figures need a phone.
+  (roughly 1 to 1.5 s for a 32-frame clip on the same CPU). Power and thermal figures need a phone.
 
 ## Design
 - **Pose-invariant features:** 7 upper-body joints + 21 landmarks per hand (2D). Centred on the mid-shoulder point, scaled by shoulder width, rotated to the shoulder line. Extra channels: wrist-centred hand shape, presence flags, frame-to-frame velocity (289 values per frame, 32 frames per clip).
-- **Robustness:** training augmentation covers rotation, anisotropic scale, landmark noise, hand and arm-joint dropout, dropped frames, mirroring (left-handed signers), speed and trim changes, mixup. `evaluate.py` reports the accuracy drop on a fixed degraded copy of the test set (12 degree tilt, 10 % horizontal squeeze, jitter, a hand occlusion, 15 % dropped frames).
+- **Robustness:** training augmentation covers rotation, anisotropic scale, landmark noise, hand and arm-joint dropout, dropped frames, mirroring (left-handed signers), speed and trim changes, mixup, plus two different landmark extractors per training clip. `evaluate.py` reports the accuracy drop on a fixed degraded copy of the test set (12 degree tilt, 10 % horizontal squeeze, jitter, a hand occlusion, 15 % dropped frames).
 - **Model:** depthwise-separable dilated 1D CNN (285k parameters each), five seeds averaged in one graph, static INT8 QDQ quantization with ONNX Runtime.
 - **Offline:** MediaPipe Holistic with `model_complexity=1`, whose weights ship inside the pip package (other settings download at runtime).
