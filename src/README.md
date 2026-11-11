@@ -60,6 +60,12 @@ Measured through the same MediaPipe path that `predict()` uses. Exact figures ar
 | Model size (INT8) | < 20 MB | 1.68 MB |
 | Model latency p95 | <= 50 ms | about 1 ms on a 2-core x86 cloud CPU (classifier only) |
 | Accuracy drop under degradation | <= 5 pt | 1.94 pt (82.17 % degraded) |
+| Latency drift over 10 min | <= 20 % | -7.7 % on the same cloud CPU (noise; not a phone) |
+| Full pipeline per clip (`predict()`) | n/a | median 1.43 s, p95 1.52 s on the same CPU |
+
+Running the literal `predict()` on all 258 test videos gives 84.50 % top-1 / 95.35 % top-5
+(`../results/predictions_wlasl100_test.jsonl`). It differs from the table by one clip because that run used
+Python 3.11 with a different ONNX Runtime build.
 
 Earlier versions, for reference: a single model trained on SPOTER landmarks only scored 63.18 % on the
 SPOTER-landmark test set; a five-seed ensemble of that scored 70.16 % there and 79.46 % on the real videos.
@@ -71,7 +77,8 @@ Known limits, stated plainly:
 - WLASL test signers and recording conditions resemble the training data. Accuracy on new signers,
   smart-glasses viewpoints, or a different vocabulary will be lower and has not been measured.
 - Latency above is the classifier only. MediaPipe landmark extraction dominates the full pipeline
-  (roughly 1 to 1.5 s for a 32-frame clip on the same CPU). Power and thermal figures need a phone.
+  (about 1.4 s for a 32-frame clip on the same CPU, i.e. roughly 45 ms per frame). Power and thermal
+  figures need a phone.
 
 ## Design
 - **Pose-invariant features:** 7 upper-body joints + 21 landmarks per hand (2D). Centred on the mid-shoulder point, scaled by shoulder width, rotated to the shoulder line. Extra channels: wrist-centred hand shape, presence flags, frame-to-frame velocity (289 values per frame, 32 frames per clip).
