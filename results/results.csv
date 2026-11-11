@@ -1,0 +1,7 @@
+metric,target,measured,unit,device,runtime,pass
+top1_accuracy,>=70,63.18,%,"cloud x86 CPU, 2 cores",ONNX Runtime INT8 CPU,FAIL
+latency_p95,<=50,0.16,ms,"cloud x86 CPU, 2 cores",ONNX Runtime INT8 CPU,PASS
+model_size,<=25,0.33,MB,"cloud x86 CPU, 2 cores",ONNX Runtime INT8 CPU,PASS
+accuracy_drop_robustness,<=5,2.71,pt,"cloud x86 CPU, 2 cores",ONNX Runtime INT8 CPU,PASS
+avg_power,<=500,,mW,"cloud x86 CPU, 2 cores",ONNX Runtime INT8 CPU,
+thermal_drift_10min,<=20,,%,"cloud x86 CPU, 2 cores",ONNX Runtime INT8 CPU,
