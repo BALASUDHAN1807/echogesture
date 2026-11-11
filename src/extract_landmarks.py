@@ -1,16 +1,17 @@
-"""Turn a labelled video list into a landmark dataset (data/features.npz).
+"""Turn your own labelled videos into a landmark dataset with MediaPipe.
 
-Usage:
-    python extract_landmarks.py --csv data/train.csv --out ../data/train.npz
-CSV columns: path,label   (label = gloss/word; case-insensitive, stored uppercase)
-Raw video is read once and never copied.
+    python extract_landmarks.py --csv ../data/train.csv --root ../data --out ../data/train.npz
+CSV columns: path,label   (label = gloss/word; stored uppercase). Raw video is read once and never copied.
 """
 import argparse
+import csv
+from pathlib import Path
+
 import numpy as np
 from tqdm import tqdm
 
-from features import extract_raw, normalize_frame, resample
-from config import FEAT_DIM
+from config import N_POINTS, T
+from features import extract_raw, normalize_sequence
 
 
 def main():
@@ -18,26 +19,24 @@ def main():
     ap.add_argument("--csv", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--root", default=".", help="folder that CSV paths are relative to")
+    ap.add_argument("--frames", type=int, default=T * 2, help="frames sampled per clip")
     a = ap.parse_args()
 
-    import csv
-    from pathlib import Path
     rows = list(csv.DictReader(open(a.csv)))
-    X, y, kept = [], [], 0
+    seqs, y = [], []
     for r in tqdm(rows):
-        try:
-            raw = extract_raw(Path(a.root) / r["path"])
-        except Exception as e:  # corrupt clip
-            print("skip", r["path"], e)
+        pts, mask = extract_raw(Path(a.root) / r["path"], a.frames)
+        if len(pts) == 0:
+            print("skip (unreadable):", r["path"])
             continue
-        if not raw:
-            continue
-        seq = np.stack([normalize_frame(*f) for f in raw])
-        X.append(resample(seq))
+        seqs.append(normalize_sequence(pts, mask))
         y.append(r["label"].strip().upper())
-        kept += 1
-    np.savez_compressed(a.out, X=np.stack(X).astype(np.float32), y=np.array(y))
-    print(f"saved {kept}/{len(rows)} clips -> {a.out}  (FEAT_DIM={FEAT_DIM})")
+    L = np.array([len(s) for s in seqs])
+    X = np.zeros((len(seqs), L.max(), N_POINTS, 3), np.float32)
+    for i, s in enumerate(seqs):
+        X[i, :len(s)] = s
+    np.savez_compressed(a.out, X=X, L=L, y=np.array(y))
+    print(f"saved {len(seqs)}/{len(rows)} clips -> {a.out}")
 
 
 if __name__ == "__main__":

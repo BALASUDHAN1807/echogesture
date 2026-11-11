@@ -1,82 +1,102 @@
-"""Train EchoNet on landmark features.
+"""Train EchoNet on landmark sequences.
 
-    python train.py --train ../data/train.npz --val ../data/val.npz --epochs 60
-Saves models/echonet.pt and models/classes.json
+    python train.py --train ../data/train.npz --val ../data/val.npz --epochs 300
+Saves models/echonet.pt (best validation top-1) and models/classes.json
 """
 import argparse
 import json
+
 import numpy as np
 import torch
 import torch.nn as nn
 
-from augment import random_augment
+from augment import random_augment, random_resample
 from config import MODEL_DIR, CLASSES_PATH, SEED, load_vocab
-from features import add_velocity
+from features import load_sequences, resample, to_model_input
 from model import EchoNet
 
 
-class DS(torch.utils.data.Dataset):
-    def __init__(self, X, y, aug):
-        self.X, self.y, self.aug = X, y, aug
+def load(path, idx):
+    seqs, y = load_sequences(path)
+    keep = [i for i, c in enumerate(y) if c in idx]
+    return [seqs[i] for i in keep], np.array([idx[y[i]] for i in keep])
+
+
+class TrainDS(torch.utils.data.Dataset):
+    def __init__(self, seqs, y):
+        self.seqs, self.y = seqs, y
 
     def __len__(self):
-        return len(self.X)
+        return len(self.seqs)
 
     def __getitem__(self, i):
-        x = random_augment(self.X[i]) if self.aug else self.X[i]
-        return torch.from_numpy(add_velocity(x)), int(self.y[i])
+        s = random_augment(random_resample(self.seqs[i]))
+        return torch.from_numpy(to_model_input(s)), int(self.y[i])
+
+
+def fixed(seqs):
+    return torch.from_numpy(np.stack([to_model_input(resample(s)) for s in seqs]))
+
+
+def top1(net, X, y):
+    net.eval()
+    with torch.no_grad():
+        return (net(X).argmax(1).numpy() == y).mean()
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True)
     ap.add_argument("--val", required=True)
-    ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--bs", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=2e-3)
+    ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--wd", type=float, default=5e-2)
+    ap.add_argument("--mixup", type=float, default=0.2)
+    ap.add_argument("--seed", type=int, default=SEED)
     a = ap.parse_args()
 
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
-    tr, va = np.load(a.train), np.load(a.val)
+    torch.manual_seed(a.seed)
+    np.random.seed(a.seed)
+    torch.set_num_threads(2)
     vocab = load_vocab()
-    classes = vocab or sorted(set(tr["y"].tolist()))
+    classes = vocab or sorted(set(load_sequences(a.train)[1].tolist()))
     idx = {c: i for i, c in enumerate(classes)}
-    keep_t = np.array([c in idx for c in tr["y"]])
-    keep_v = np.array([c in idx for c in va["y"]])
-    Xt, yt = tr["X"][keep_t], np.array([idx[c] for c in tr["y"][keep_t]])
-    Xv, yv = va["X"][keep_v], np.array([idx[c] for c in va["y"][keep_v]])
-    print(f"{len(classes)} classes, {len(Xt)} train / {len(Xv)} val clips")
+    tr_s, tr_y = load(a.train, idx)
+    va_s, va_y = load(a.val, idx)
+    Xv = fixed(va_s)
+    print(f"{len(classes)} classes, {len(tr_s)} train / {len(va_s)} val clips")
 
-    dl = torch.utils.data.DataLoader(DS(Xt, yt, True), batch_size=a.bs, shuffle=True, drop_last=len(Xt) > a.bs)
-    dv = torch.utils.data.DataLoader(DS(Xv, yv, False), batch_size=128)
-
+    dl = torch.utils.data.DataLoader(TrainDS(tr_s, tr_y), batch_size=a.bs, shuffle=True, drop_last=True)
     net = EchoNet(len(classes))
-    opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-2)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=a.epochs * len(dl))
+    print("params:", sum(p.numel() for p in net.parameters()))
+    opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=a.wd)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=a.epochs * len(dl), pct_start=0.1)
     loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
     best = -1.0
     MODEL_DIR.mkdir(exist_ok=True)
+    CLASSES_PATH.write_text(json.dumps(classes))
     for ep in range(a.epochs):
         net.train()
         for x, y in dl:
             opt.zero_grad()
-            loss_fn(net(x), y).backward()
+            if a.mixup > 0:
+                lam = float(np.random.beta(a.mixup, a.mixup))
+                perm = torch.randperm(len(x))
+                out = net(lam * x + (1 - lam) * x[perm])
+                loss = lam * loss_fn(out, y) + (1 - lam) * loss_fn(out, y[perm])
+            else:
+                loss = loss_fn(net(x), y)
+            loss.backward()
             opt.step()
             sched.step()
-        net.eval()
-        correct = n = 0
-        with torch.no_grad():
-            for x, y in dv:
-                correct += (net(x).argmax(1) == y).sum().item()
-                n += len(y)
-        acc = correct / max(n, 1)
-        print(f"epoch {ep + 1:3d}  val top1 {acc:.3f}")
+        acc = top1(net, Xv, va_y)
         if acc > best:
             best = acc
             torch.save(net.state_dict(), MODEL_DIR / "echonet.pt")
-    CLASSES_PATH.write_text(json.dumps(classes))
-    print("best val top1", best)
+        if (ep + 1) % 10 == 0 or ep == a.epochs - 1:
+            print(f"epoch {ep + 1:3d}  loss {loss.item():.3f}  val top1 {acc:.3f}  best {best:.3f}", flush=True)
+    print("best val top1", round(float(best), 4))
 
 
 if __name__ == "__main__":

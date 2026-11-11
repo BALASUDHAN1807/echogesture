@@ -1,6 +1,6 @@
 """Measure the scored metrics on a held-out landmark set and write results/results.csv.
 
-    python evaluate.py --test ../data/test.npz --device "Galaxy S25" --runtime "ORT INT8 CPU"
+    python evaluate.py --test ../data/test.npz --device "<device>" --runtime "ONNX Runtime INT8 CPU"
 avg_power needs a real phone (e.g. Android battery stats / Snapdragon Profiler): pass --power-mw.
 """
 import argparse
@@ -8,44 +8,43 @@ import csv
 import json
 import os
 import time
+
 import numpy as np
 
 from augment import degrade
 from config import MODEL_PATH, CLASSES_PATH
-from features import add_velocity
+from features import load_sequences, resample, to_model_input
 from main import predict_from_features
 
 
-def accuracy(X, y, classes, transform=None):
+def accuracy(seqs, labels, classes, harsh=False, model_path=None):
     idx = {c: i for i, c in enumerate(classes)}
     top1 = top5 = n = 0
     lat = []
-    for x, lab in zip(X, y):
+    for i, lab in enumerate(labels):
         if lab not in idx:
             continue
-        if transform:
-            x = transform(x)
-        p, ms = predict_from_features(add_velocity(x))
+        s = resample(seqs[i])
+        if harsh:
+            s = degrade(s, seed=i)
+        p, ms = predict_from_features(to_model_input(s), model_path)
         order = np.argsort(-p)
         top1 += order[0] == idx[lab]
         top5 += idx[lab] in order[:5]
         lat.append(ms)
         n += 1
-    return 100 * top1 / n, 100 * top5 / n, lat
+    return 100 * top1 / n, 100 * top5 / n, lat, n
 
 
-def thermal_drift(X, minutes):
-    """% change of median model latency between first and last minute of sustained inference."""
-    x = add_velocity(X[0])
-    end = time.time() + minutes * 60
-    first, last, t0 = [], [], time.time()
-    while time.time() < end:
+def thermal_drift(x, minutes):
+    """% change in median model latency between the first and last 10 % of a sustained run."""
+    total = minutes * 60
+    t0, samples = time.time(), []
+    while time.time() - t0 < total:
         _, ms = predict_from_features(x)
-        (first if time.time() - t0 < minutes * 6 else last).append(ms)   # first/last 10 % windows
-        if time.time() > end - minutes * 6:
-            last.append(ms)
-    first = first or [1.0]
-    last = last or first
+        samples.append((time.time() - t0, ms))
+    first = [m for t, m in samples if t < 0.1 * total]
+    last = [m for t, m in samples if t > 0.9 * total]
     return 100 * (np.median(last) - np.median(first)) / np.median(first)
 
 
@@ -59,12 +58,17 @@ def main():
     ap.add_argument("--thermal-minutes", type=float, default=10)
     a = ap.parse_args()
 
-    d = np.load(a.test)
+    seqs, labels = load_sequences(a.test)
     classes = json.loads(CLASSES_PATH.read_text())
-    t1, t5, lat = accuracy(d["X"], d["y"], classes)
-    t1d, _, _ = accuracy(d["X"], d["y"], classes, lambda x: degrade(x))
+    t1, t5, lat, n = accuracy(seqs, labels, classes)
+    t1d, t5d, _, _ = accuracy(seqs, labels, classes, harsh=True)
+    fp32 = MODEL_PATH.with_name("echogesture_fp32.onnx")
+    if fp32.exists():
+        f1, _, _, _ = accuracy(seqs, labels, classes, model_path=fp32)
+        print(f"fp32 top1 {f1:.2f}%  (INT8 costs {f1 - t1:+.2f} pt)")
     size = os.path.getsize(MODEL_PATH) / 1e6
-    drift = thermal_drift(d["X"], a.thermal_minutes) if a.thermal_minutes > 0 else None
+    x0 = to_model_input(resample(seqs[0]))
+    drift = thermal_drift(x0, a.thermal_minutes) if a.thermal_minutes > 0 else None
     p95 = float(np.percentile(lat, 95))
 
     def row(metric, target, val, unit, ok):
@@ -83,7 +87,8 @@ def main():
         w = csv.writer(f)
         w.writerow(["metric", "target", "measured", "unit", "device", "runtime", "pass"])
         w.writerows(rows)
-    print(f"top1 {t1:.1f}%  top5 {t5:.1f}%  degraded top1 {t1d:.1f}%  p95 {p95:.2f} ms (model only)  size {size:.2f} MB")
+    print(f"{n} clips | top1 {t1:.2f}%  top5 {t5:.2f}% | degraded top1 {t1d:.2f}% top5 {t5d:.2f}% | "
+          f"p95 {p95:.2f} ms (model only) | size {size:.2f} MB" + ("" if drift is None else f" | drift {drift:+.1f}%"))
     print("wrote", a.out)
 
 

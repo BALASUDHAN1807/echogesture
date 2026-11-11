@@ -1,111 +1,101 @@
-"""Landmark-space augmentation + degradation used for training and robustness evaluation.
+"""Landmark-space augmentation and the fixed degradation used for the robustness metric.
 
-All functions take/return [T, FEAT_DIM] arrays (before velocity is appended).
+All functions take/return landmark sequences [N, 49, 3] = (x, y, present).
 """
 import numpy as np
 
-from config import N_POSE, N_HAND, FEAT_LANDMARK, COORDS
-
-_L = slice(N_POSE * COORDS, (N_POSE + N_HAND) * COORDS)
-_R = slice((N_POSE + N_HAND) * COORDS, FEAT_LANDMARK)
+from config import N_POSE, N_HAND, N_POINTS, L_HAND, R_HAND, T
 
 
-def _pts(x):
-    return x[:, :FEAT_LANDMARK].reshape(len(x), -1, COORDS)
-
-
-def rotate(x, deg):
+def rotate(s, deg):
     a = np.deg2rad(deg)
-    c, s = np.cos(a), np.sin(a)
-    R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
-    out = x.copy()
-    out[:, :FEAT_LANDMARK] = (_pts(x) @ R.T).reshape(len(x), -1)
+    c, si = np.cos(a), np.sin(a)
+    out = s.copy()
+    out[..., :2] = s[..., :2] @ np.array([[c, -si], [si, c]], np.float32).T
     return out
 
 
-def scale(x, f):
-    out = x.copy()
-    out[:, :FEAT_LANDMARK] *= f
+def scale(s, fx, fy=None):
+    out = s.copy()
+    out[..., 0] *= fx
+    out[..., 1] *= fx if fy is None else fy
     return out
 
 
-def noise(x, sigma):
-    out = x.copy()
-    n = np.random.randn(len(x), FEAT_LANDMARK).astype(np.float32) * sigma
-    mask = np.ones_like(n)
-    mask[:, _L.start:_L.stop] *= x[:, FEAT_LANDMARK:FEAT_LANDMARK + 1]
-    mask[:, _R.start:_R.stop] *= x[:, FEAT_LANDMARK + 1:FEAT_LANDMARK + 2]
-    out[:, :FEAT_LANDMARK] += n * mask
+def noise(s, sigma):
+    out = s.copy()
+    out[..., :2] += np.random.randn(*s[..., :2].shape).astype(np.float32) * sigma * s[..., 2:]
     return out
 
 
-def drop_hand(x, which, start=None, length=None):
-    """Simulate occlusion: zero one hand (0=left, 1=right) over a time window."""
-    out = x.copy()
-    t = len(x)
-    length = length or t
-    start = 0 if start is None else start
-    sl = slice(start, min(t, start + length))
-    block = _L if which == 0 else _R
-    out[sl, block] = 0
-    out[sl, FEAT_LANDMARK + which] = 0
+def drop_points(s, sl, start=0, length=None):
+    """Simulate occlusion: mark points in slice `sl` missing over a time window."""
+    out = s.copy()
+    end = len(s) if length is None else min(len(s), start + length)
+    out[start:end, sl] = 0
     return out
 
 
-def drop_frames(x, p):
+def drop_frames(s, p):
     """Simulate dropped frames: repeat the previous frame with probability p."""
-    out = x.copy()
-    for i in range(1, len(x)):
+    out = s.copy()
+    for i in range(1, len(s)):
         if np.random.rand() < p:
             out[i] = out[i - 1]
     return out
 
 
-def mirror(x):
-    """Left/right-handed signers: flip x and swap hands + paired pose points."""
-    out = x.copy()
-    pts = _pts(out)
-    pts[:, :, 0] *= -1
+def mirror(s):
+    """Left/right-handed signers: flip x, swap hands and paired pose joints."""
+    out = s.copy()
+    out[..., 0] *= -1
     for a, b in [(1, 2), (3, 4), (5, 6)]:
-        pts[:, [a, b]] = pts[:, [b, a]]
-    L, R = pts[:, N_POSE:N_POSE + N_HAND].copy(), pts[:, N_POSE + N_HAND:].copy()
-    pts[:, N_POSE:N_POSE + N_HAND], pts[:, N_POSE + N_HAND:] = R, L
-    out[:, :FEAT_LANDMARK] = pts.reshape(len(x), -1)
-    out[:, FEAT_LANDMARK:FEAT_LANDMARK + 2] = x[:, FEAT_LANDMARK:FEAT_LANDMARK + 2][:, ::-1]
+        out[:, [a, b]] = out[:, [b, a]]
+    left, right = out[:, L_HAND].copy(), out[:, R_HAND].copy()
+    out[:, L_HAND], out[:, R_HAND] = right, left
     return out
 
 
-def time_warp(x, max_shift=3):
-    s = np.random.randint(-max_shift, max_shift + 1)
-    return np.roll(x, s, axis=0)
+def random_resample(s, t=T):
+    """Temporal augmentation: random start/end trim, speed change and frame jitter."""
+    n = len(s)
+    a = np.random.uniform(0, 0.12) * (n - 1)
+    b = (1 - np.random.uniform(0, 0.12)) * (n - 1)
+    idx = np.linspace(a, b, t) + np.random.uniform(-0.5, 0.5, t) * (b - a) / t
+    return s[np.clip(idx.round().astype(int), 0, n - 1)]
 
 
-def random_augment(x):
-    if np.random.rand() < 0.5:
-        x = rotate(x, np.random.uniform(-20, 20))
-    if np.random.rand() < 0.5:
-        x = scale(x, np.random.uniform(0.85, 1.15))
-    if np.random.rand() < 0.5:
-        x = noise(x, np.random.uniform(0.002, 0.02))
-    if np.random.rand() < 0.3:
-        t = len(x)
-        x = drop_hand(x, np.random.randint(2), np.random.randint(0, t // 2), np.random.randint(4, t // 2))
-    if np.random.rand() < 0.3:
-        x = drop_frames(x, np.random.uniform(0.05, 0.25))
-    if np.random.rand() < 0.2:
-        x = mirror(x)
-    if np.random.rand() < 0.3:
-        x = time_warp(x)
-    return x
+def random_augment(s):
+    r = np.random.rand
+    if r() < 0.6:
+        s = rotate(s, np.random.uniform(-15, 15))
+    if r() < 0.6:
+        s = scale(s, np.random.uniform(0.85, 1.15), np.random.uniform(0.85, 1.15))
+    if r() < 0.6:
+        s = noise(s, np.random.uniform(0.005, 0.03))
+    n = len(s)
+    if r() < 0.25:
+        s = drop_points(s, L_HAND if r() < 0.5 else R_HAND, np.random.randint(0, n), np.random.randint(2, n // 3))
+    if r() < 0.25:
+        j = np.random.choice([3, 4, 5, 6])
+        s = drop_points(s, slice(j, j + 1), np.random.randint(0, n), np.random.randint(2, n // 2))
+    if r() < 0.25:
+        s = drop_frames(s, np.random.uniform(0.05, 0.2))
+    if r() < 0.3:
+        s = mirror(s)
+    return s
 
 
-def degrade(x, seed=0):
-    """Fixed harsh-condition transform for the robustness metric (angled signer, occlusion, jitter, drops)."""
-    rng_state = np.random.get_state()
+def degrade(s, seed=0):
+    """Fixed harsh-condition transform for the robustness metric:
+    tilted + angled signer, landmark jitter, a partial hand occlusion and dropped frames."""
+    state = np.random.get_state()
     np.random.seed(seed)
-    x = rotate(x, 15)
-    x = noise(x, 0.01)
-    x = drop_hand(x, np.random.randint(2), len(x) // 3, len(x) // 4)
-    x = drop_frames(x, 0.15)
-    np.random.set_state(rng_state)
-    return x
+    n = len(s)
+    s = rotate(s, 12)
+    s = scale(s, 0.9, 1.0)
+    s = noise(s, 0.015)
+    s = drop_points(s, L_HAND if np.random.rand() < 0.5 else R_HAND, n // 3, n // 5)
+    s = drop_frames(s, 0.15)
+    np.random.set_state(state)
+    return s

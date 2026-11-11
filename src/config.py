@@ -7,17 +7,18 @@ MODEL_PATH = MODEL_DIR / "echogesture_int8.onnx"
 CLASSES_PATH = MODEL_DIR / "classes.json"
 VOCAB_PATH = ROOT / "vocab.txt"
 
-T = 32                      # frames per clip after temporal resampling
-POSE_IDX = [0, 11, 12, 13, 14, 15, 16]   # nose, shoulders, elbows, wrists (MediaPipe pose)
+T = 32                                   # frames per clip after temporal resampling
+POSE_IDX = [0, 11, 12, 13, 14, 15, 16]   # nose, L/R shoulder, L/R elbow, L/R wrist (MediaPipe pose ids)
 N_POSE = len(POSE_IDX)
 N_HAND = 21
-N_POINTS = N_POSE + 2 * N_HAND           # 49 landmarks
-COORDS = 3
-# per frame: landmarks (49*3) + 2 hand-present flags
-FEAT_LANDMARK = N_POINTS * COORDS
-FEAT_DIM = FEAT_LANDMARK + 2
-# model input adds velocity of landmark part -> FEAT_LANDMARK extra
-MODEL_IN_DIM = FEAT_DIM + FEAT_LANDMARK
+N_POINTS = N_POSE + 2 * N_HAND           # 49 landmarks, 2D
+L_HAND = slice(N_POSE, N_POSE + N_HAND)
+R_HAND = slice(N_POSE + N_HAND, N_POINTS)
+POSE_VIS_MIN = 0.5                       # pose joints below this visibility count as missing
+VEL_GAIN = 4.0
+
+# model input per frame: body-frame xy (98) + hand-local xy (84) + presence flags (9) + velocity (98)
+MODEL_IN_DIM = N_POINTS * 2 + 2 * N_HAND * 2 + (N_POSE + 2) + N_POINTS * 2
 
 SEED = 42
 

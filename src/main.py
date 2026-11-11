@@ -15,19 +15,21 @@ import numpy as np
 
 from config import MODEL_PATH, CLASSES_PATH
 
-_session = None
+_session = {}
 _classes = None
 
 
-def _load():
+def _load(model_path=None):
     global _session, _classes
-    if _session is None:
+    if _classes is None:
+        _classes = json.loads(CLASSES_PATH.read_text())
+    key = str(model_path or MODEL_PATH)
+    if key not in _session:
         import onnxruntime as ort
         so = ort.SessionOptions()
         so.intra_op_num_threads = 2
-        _session = ort.InferenceSession(str(MODEL_PATH), so, providers=["CPUExecutionProvider"])
-        _classes = json.loads(CLASSES_PATH.read_text())
-    return _session, _classes
+        _session[key] = ort.InferenceSession(key, so, providers=["CPUExecutionProvider"])
+    return _session[key], _classes
 
 
 def _softmax(z):
@@ -35,9 +37,9 @@ def _softmax(z):
     return e / e.sum()
 
 
-def predict_from_features(x):
+def predict_from_features(x, model_path=None):
     """x: [T, MODEL_IN_DIM] float32 -> (probs over classes, model-only latency in ms)."""
-    sess, classes = _load()
+    sess, _ = _load(model_path)
     t0 = time.perf_counter()
     logits = sess.run(None, {"input": x[None].astype(np.float32)})[0][0]
     ms = (time.perf_counter() - t0) * 1000
