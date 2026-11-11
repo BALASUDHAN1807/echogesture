@@ -2,6 +2,11 @@
 
     python train.py --train ../data/train.npz --val ../data/val.npz --epochs 300
 Saves models/echonet.pt (best validation top-1) and models/classes.json
+
+Final ensemble (train+val, fixed schedule, one model per seed):
+    for s in 1 2 3 4 5; do python train.py --train ../data/train.npz --also-train ../data/val.npz \
+        --val ../data/val.npz --save-last --seed $s --out echonet_s$s.pt; done
+(with --also-train the printed val accuracy is on data the model has seen - ignore it.)
 """
 import argparse
 import json
@@ -48,6 +53,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True)
     ap.add_argument("--val", required=True)
+    ap.add_argument("--also-train", nargs="*", default=[], help="extra npz files merged into the training set")
+    ap.add_argument("--out", default="echonet.pt", help="checkpoint file name inside models/")
+    ap.add_argument("--save-last", action="store_true", help="keep the final epoch instead of the best-val epoch")
+    ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--bs", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
@@ -58,11 +67,14 @@ def main():
 
     torch.manual_seed(a.seed)
     np.random.seed(a.seed)
-    torch.set_num_threads(2)
+    torch.set_num_threads(a.threads)
     vocab = load_vocab()
     classes = vocab or sorted(set(load_sequences(a.train)[1].tolist()))
     idx = {c: i for i, c in enumerate(classes)}
     tr_s, tr_y = load(a.train, idx)
+    for extra in a.also_train:
+        es, ey = load(extra, idx)
+        tr_s, tr_y = tr_s + es, np.concatenate([tr_y, ey])
     va_s, va_y = load(a.val, idx)
     Xv = fixed(va_s)
     print(f"{len(classes)} classes, {len(tr_s)} train / {len(va_s)} val clips")
@@ -91,9 +103,9 @@ def main():
             opt.step()
             sched.step()
         acc = top1(net, Xv, va_y)
-        if acc > best:
-            best = acc
-            torch.save(net.state_dict(), MODEL_DIR / "echonet.pt")
+        best = max(best, acc)
+        if a.save_last or acc >= best:
+            torch.save(net.state_dict(), MODEL_DIR / a.out)
         if (ep + 1) % 10 == 0 or ep == a.epochs - 1:
             print(f"epoch {ep + 1:3d}  loss {loss.item():.3f}  val top1 {acc:.3f}  best {best:.3f}", flush=True)
     print("best val top1", round(float(best), 4))

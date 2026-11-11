@@ -34,5 +34,18 @@ class EchoNet(nn.Module):
         return self.head(self.drop(x))
 
 
+class Ensemble(nn.Module):
+    """Average the logits of several EchoNets (trained with different seeds) inside one graph."""
+    def __init__(self, nets):
+        super().__init__()
+        self.nets = nn.ModuleList(nets)
+
+    def forward(self, x):
+        out = self.nets[0](x)
+        for n in self.nets[1:]:
+            out = out + n(x)
+        return out / len(self.nets)
+
+
 def example_input(batch=1):
     return torch.zeros(batch, T, MODEL_IN_DIM)

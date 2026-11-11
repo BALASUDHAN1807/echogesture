@@ -1,6 +1,7 @@
 """Export trained EchoNet to ONNX and quantize to INT8 (static, QDQ).
 
-    python convert.py --calib ../data/train.npz
+    python convert.py --calib ../data/train.npz                       # single model
+    python convert.py --calib ../data/train.npz --ckpt "echonet_s*.pt"  # ensemble of seeds
 Writes models/echogesture_fp32.onnx and models/echogesture_int8.onnx
 """
 import argparse
@@ -13,7 +14,7 @@ from onnxruntime.quantization import CalibrationDataReader, QuantFormat, QuantTy
 
 from config import MODEL_DIR, MODEL_PATH, CLASSES_PATH
 from features import load_sequences, resample, to_model_input
-from model import EchoNet, example_input
+from model import EchoNet, Ensemble, example_input
 
 
 class Reader(CalibrationDataReader):
@@ -28,13 +29,20 @@ class Reader(CalibrationDataReader):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calib", required=True, help="landmark npz used to calibrate activation ranges")
+    ap.add_argument("--ckpt", default="echonet.pt", help="checkpoint glob inside models/; several files = ensemble")
     ap.add_argument("--max-mb", type=float, default=20.0)
     a = ap.parse_args()
 
     classes = json.loads(CLASSES_PATH.read_text())
-    net = EchoNet(len(classes))
-    net.load_state_dict(torch.load(MODEL_DIR / "echonet.pt", map_location="cpu"))
-    net.eval()
+    ckpts = sorted(MODEL_DIR.glob(a.ckpt))
+    assert ckpts, f"no checkpoints match models/{a.ckpt}"
+    nets = []
+    for c in ckpts:
+        n = EchoNet(len(classes))
+        n.load_state_dict(torch.load(c, map_location="cpu"))
+        nets.append(n)
+    net = (Ensemble(nets) if len(nets) > 1 else nets[0]).eval()
+    print("exporting", [c.name for c in ckpts])
 
     fp32 = MODEL_DIR / "echogesture_fp32.onnx"
     torch.onnx.export(net, example_input(), str(fp32), input_names=["input"], output_names=["logits"],
