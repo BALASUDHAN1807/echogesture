@@ -30,6 +30,8 @@ Full metrics are in [`results/results.csv`](results/results.csv). Limits and the
 | `src/Dockerfile` | inference-only container |
 | `results/results.csv` | measured metrics |
 | `results/predictions_wlasl100_test.jsonl` | `predict()` output for the 258 WLASL100 test videos |
+| `docs/SRMIST_EchoGesture_demo.mp4` | 2-minute demo video: real test clips captioned by the model, plus a stress test |
+| `docs/SRMIST_EchoGesture.pptx`, `.pdf` | presentation |
 | `AI_DISCLOSURE.md` | how AI tools were used in this project |
 
 ## Quick start (Python 3.11)

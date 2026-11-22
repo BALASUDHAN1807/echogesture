@@ -11,6 +11,7 @@
   ONNX export and INT8 quantization, evaluation and `predict()`.
 - Found the training data, ran landmark extraction, training, quantization and evaluation, and produced
   `results/results.csv` and `results/predictions_wlasl100_test.jsonl`.
+- Made the demo video and the presentation in `docs/`.
 - Wrote the README files and this disclosure.
 
 ## What the team did
