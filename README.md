@@ -32,6 +32,7 @@ Full metrics are in [`results/results.csv`](results/results.csv). Limits and the
 | `results/predictions_wlasl100_test.jsonl` | `predict()` output for the 258 WLASL100 test videos |
 | `docs/SRMIST_EchoGesture_demo.mp4` | 2-minute demo video: real test clips captioned by the model, plus a stress test |
 | `docs/SRMIST_EchoGesture.pptx`, `.pdf` | presentation |
+| [Canva version](https://www.canva.com/d/swOz12dXGJAmoNb) | the same presentation, designed in Canva (view link) |
 | `AI_DISCLOSURE.md` | how AI tools were used in this project |
 
 ## Quick start (Python 3.11)
